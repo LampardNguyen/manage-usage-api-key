@@ -1,0 +1,32 @@
+{
+  "name": "manage-usage-api-key",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Proxy OpenAI chat/completions cấp key con có giới hạn $ ước tính",
+  "main": "src/server.js",
+  "license": "MIT",
+  "author": "Nguyen Duy Linh",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LampardNguyen/manage-usage-api-key.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LampardNguyen/manage-usage-api-key/issues"
+  },
+  "homepage": "https://github.com/LampardNguyen/manage-usage-api-key#readme",
+  "scripts": {
+    "start": "node src/server.js",
+    "mock": "node scripts/mock-openai.js"
+  },
+  "engines": {
+    "node": "16.15.1"
+  },
+  "volta": {
+    "node": "16.15.1"
+  },
+  "dependencies": {
+    "alpinejs": "3.14.9",
+    "dotenv": "16.4.7",
+    "express": "4.21.2"
+  }
+}

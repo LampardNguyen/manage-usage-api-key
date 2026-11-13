@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Key Guard</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="app.js"></script>
+  <script defer src="vendor/alpine.js"></script>
+</head>
+<body x-data="app()" x-init="init()">
+  <template x-if="authed === false">
+    <main class="login">
+      <form class="card" @submit.prevent="login()">
+        <h1>Key Guard</h1>
+        <p class="muted">Quản lý key con cho OpenAI proxy</p>
+        <input type="password" x-model="password" placeholder="Mật khẩu" autofocus required>
+        <p class="error" x-show="loginError" x-text="loginError"></p>
+        <button class="primary" type="submit">Đăng nhập</button>
+      </form>
+    </main>
+  </template>
+
+  <template x-if="authed">
+    <div>
+      <header class="topbar">
+        <a href="#/" class="brand">Key Guard</a>
+        <nav>
+          <a href="#/" :class="{active: view==='keys' || view==='key'}">Keys</a>
+          <a href="#/logs" :class="{active: view==='logs'}">Nhật ký</a>
+          <a href="#/settings" :class="{active: view==='settings'}">Cài đặt</a>
+        </nav>
+        <div class="run-info">
+          <span class="muted small mono" x-text="state.settings.model + ' · effort: ' + (state.settings.reasoningEffort || '—')"></span>
+          <button class="ghost" @click="logout()">Thoát</button>
+        </div>
+      </header>
+
+      <div class="banner error" x-show="!state.pricesReady">
+        Chưa đặt giá model → chưa tính được $ và <b>chưa chặn được key theo giới hạn $</b>.
+        <a href="#/settings">Đặt giá trong Cài đặt</a>
+      </div>
+
+      <main class="content">
+        <!-- ===== Danh sách key ===== -->
+        <section x-show="view==='keys'">
+          <div class="stats">
+            <div class="card stat"><b x-text="state.keys.length"></b><span>Key con</span></div>
+            <div class="card stat warn"><b x-text="countStatus('warn')"></b><span>Sắp hết (≥ 80%)</span></div>
+            <div class="card stat danger"><b x-text="countStatus('over')"></b><span>Hết hạn mức</span></div>
+            <div class="card stat"><b x-text="countStatus('disabled')"></b><span>Đang khoá</span></div>
+            <div class="card stat"><b x-text="'$' + fmtUsd(sum('usd'))"></b><span>Đã dùng (từ lần reset)</span></div>
+          </div>
+
+          <div class="toolbar">
+            <input type="search" x-model="search" placeholder="Tìm theo tên key…">
+            <select x-model="filterStatus">
+              <option value="">Mọi trạng thái</option>
+              <option value="over">Hết hạn mức</option>
+              <option value="warn">Sắp hết</option>
+              <option value="ok">OK</option>
+              <option value="unlimited">Không giới hạn</option>
+              <option value="disabled">Đang khoá</option>
+            </select>
+            <button class="primary" @click="openCreate()">+ Tạo key</button>
+          </div>
+
+          <div class="card table-wrap">
+            <table>
+              <thead><tr>
+                <th>Key</th><th>Đã dùng / Giới hạn</th><th class="num">Token vào</th><th class="num">Token ra</th><th class="num">Request</th><th>Dùng lần cuối</th><th>Trạng thái</th>
+              </tr></thead>
+              <tbody>
+                <template x-for="k in filteredKeys()" :key="k.id">
+                  <tr class="clickable" :class="{dim: k.disabled}" @click="location.hash = '#/key/' + k.id">
+                    <td><div class="strong" x-text="k.name"></div><div class="muted small mono" x-text="k.hint"></div></td>
+                    <td class="bar-cell">
+                      <template x-if="k.pct !== null">
+                        <div class="bar"><div :class="barClass(k.pct)" :style="`width:${Math.min(k.pct,100)}%`"></div></div>
+                      </template>
+                      <span class="small" x-text="'$' + fmtUsd(k.used.usd) + ' / ' + (k.usdLimit ? '$' + k.usdLimit : 'không giới hạn') + (k.pct !== null ? ' · ' + Math.round(k.pct) + '%' : '')"></span>
+                    </td>
+                    <td class="num" x-text="fmtNum(k.used.input + k.used.cached)"></td>
+                    <td class="num" x-text="fmtNum(k.used.output)"></td>
+                    <td class="num" x-text="fmtNum(k.used.requests)"></td>
+                    <td class="small muted nowrap" x-text="fmtDate(k.lastUsedAt)"></td>
+                    <td><span class="badge" :class="statusClass(k.status)" x-text="statusLabel(k.status)"></span></td>
+                  </tr>
+                </template>
+                <tr x-show="filteredKeys().length === 0"><td colspan="7" class="empty">Chưa có key nào — bấm "+ Tạo key"</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="card small">
+            <b>Cách App A gọi:</b> base URL <span class="mono" x-text="location.origin + state.endpoint"></span>,
+            endpoint <span class="mono">POST /chat/completions</span>, header <span class="mono">Authorization: Bearer sk-tg-…</span>.
+            Model và reasoning effort luôn bị ghi đè theo Cài đặt. Không hỗ trợ streaming.
+          </div>
+        </section>
+
+        <!-- ===== Chi tiết key ===== -->
+        <section x-show="view==='key'">
+          <template x-if="detail">
+            <div>
+              <a href="#/" class="back">← Danh sách key</a>
+              <div class="detail-head">
+                <div>
+                  <h2 x-text="detail.key.name"></h2>
+                  <div class="muted small">
+                    <span class="mono" x-text="detail.key.hint"></span> ·
+                    tạo <span x-text="fmtDate(detail.key.createdAt)"></span> ·
+                    dùng lần cuối <span x-text="fmtDate(detail.key.lastUsedAt)"></span>
+                  </div>
+                </div>
+                <span class="badge big" :class="statusClass(detail.key.status)" x-text="statusLabel(detail.key.status)"></span>
+              </div>
+
+              <div class="card">
+                <div class="usage-head">
+                  <div>
+                    <div class="muted small" x-text="'Từ lần reset gần nhất (' + fmtDate(detail.key.used.since) + ')'"></div>
+                    <div class="big-num" x-text="'$' + fmtUsd(detail.key.used.usd, 4) + (detail.key.usdLimit ? ' / $' + detail.key.usdLimit : '')"></div>
+                  </div>
+                  <button class="warn-btn" @click="resetKey()">Reset bộ đếm</button>
+                </div>
+                <template x-if="detail.key.pct !== null">
+                  <div class="bar tall"><div :class="barClass(detail.key.pct)" :style="`width:${Math.min(detail.key.pct,100)}%`"></div></div>
+                </template>
+                <div class="mini-stats">
+                  <div><b x-text="fmtNum(detail.key.used.input)"></b><span>Token vào</span></div>
+                  <div><b x-text="fmtNum(detail.key.used.cached)"></b><span>Token vào (cache)</span></div>
+                  <div><b x-text="fmtNum(detail.key.used.output)"></b><span>Token ra</span></div>
+                  <div><b x-text="fmtNum(detail.key.used.requests)"></b><span>Request</span></div>
+                  <div><b x-text="'$' + fmtUsd(detail.key.lifetime.usd)"></b><span x-text="'Trọn đời · ' + fmtNum(detail.key.lifetime.tokens) + ' token'"></span></div>
+                </div>
+              </div>
+
+              <div class="grid2">
+                <div class="card">
+                  <h3>$ ước tính theo ngày (31 ngày, UTC)</h3>
+                  <div class="chart">
+                    <template x-for="d in detail.daily" :key="d.date">
+                      <div class="col" :title="d.date + ': $' + fmtUsd(d.usd, 4) + ', ' + fmtNum(d.tokens) + ' token, ' + d.requests + ' request'">
+                        <div class="fill" :style="`height:${chartPct(d)}%`"></div>
+                      </div>
+                    </template>
+                  </div>
+                  <div class="chart-axis small muted">
+                    <span x-text="detail.daily[0].date"></span>
+                    <span x-text="detail.daily[detail.daily.length-1].date"></span>
+                  </div>
+                </div>
+
+                <div>
+                  <form class="card" @submit.prevent="saveKey()">
+                    <h3>Cấu hình</h3>
+                    <div class="form-grid">
+                      <label>Tên key <input x-model="keyForm.name" maxlength="60" required></label>
+                      <label>Giới hạn $ (ước tính) <input type="number" min="0.0001" step="any" x-model="keyForm.usdLimit" placeholder="bỏ trống = không giới hạn"></label>
+                    </div>
+                    <p class="error" x-show="keyError" x-text="keyError"></p>
+                    <div class="actions">
+                      <button class="primary" type="submit">Lưu</button>
+                      <button type="button" @click="toggleDisabled()" x-text="detail.key.disabled ? 'Mở khoá key' : 'Khoá key'"></button>
+                    </div>
+                  </form>
+
+                  <div class="card danger-zone">
+                    <h3>Xoá key</h3>
+                    <p class="small">App đang dùng key này sẽ nhận lỗi 401 ngay. Gõ tên <b class="mono" x-text="detail.key.name"></b> để xác nhận.</p>
+                    <input x-model="confirmName" placeholder="Tên key">
+                    <p class="error" x-show="deleteError" x-text="deleteError"></p>
+                    <button class="danger" :disabled="confirmName !== detail.key.name" @click="deleteKey()">Xoá vĩnh viễn</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="card table-wrap">
+                <h3 class="pad">50 request gần nhất</h3>
+                <table>
+                  <thead><tr><th>Thời gian</th><th>Mã</th><th class="num">Vào</th><th class="num">Cache</th><th class="num">Ra</th><th class="num">$</th><th class="num">Thời gian xử lý</th><th>Lỗi</th></tr></thead>
+                  <tbody>
+                    <template x-for="r in detail.requests" :key="r.at + '-' + r.status + '-' + r.ms">
+                      <tr>
+                        <td class="nowrap small muted" x-text="fmtDate(r.at)"></td>
+                        <td><span class="badge" :class="r.status === 200 ? 'ok' : 'danger'" x-text="r.status"></span></td>
+                        <td class="num" x-text="r.input != null ? fmtNum(r.input) : '—'"></td>
+                        <td class="num" x-text="r.cached != null ? fmtNum(r.cached) : '—'"></td>
+                        <td class="num" x-text="r.output != null ? fmtNum(r.output) : '—'"></td>
+                        <td class="num" x-text="r.usd != null ? '$' + fmtUsd(r.usd, 5) : '—'"></td>
+                        <td class="num" x-text="r.ms + ' ms'"></td>
+                        <td class="small" x-text="r.error || ''"></td>
+                      </tr>
+                    </template>
+                    <tr x-show="detail.requests.length === 0"><td colspan="8" class="empty">Chưa có request</td></tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="card">
+                <h3>Lịch sử thao tác</h3>
+                <table>
+                  <tbody>
+                    <template x-for="e in detail.events" :key="e.at + e.type">
+                      <tr><td class="nowrap small muted" x-text="fmtDate(e.at)"></td><td x-text="e.message"></td></tr>
+                    </template>
+                    <tr x-show="detail.events.length === 0"><td class="empty">Chưa có</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+        </section>
+
+        <!-- ===== Nhật ký ===== -->
+        <section x-show="view==='logs'">
+          <div class="toolbar">
+            <div class="tabs">
+              <button :class="{active: logTab==='requests'}" @click="logTab='requests'; loadLogs()">Request</button>
+              <button :class="{active: logTab==='events'}" @click="logTab='events'; loadLogs()">Thao tác quản trị</button>
+            </div>
+            <template x-if="logTab==='requests'">
+              <div class="toolbar inner">
+                <select x-model="logKey" @change="loadLogs()">
+                  <option value="">Mọi key</option>
+                  <template x-for="k in state.keys" :key="k.id"><option :value="k.id" x-text="k.name"></option></template>
+                </select>
+                <label class="inline"><input type="checkbox" x-model="logErrorsOnly" @change="loadLogs()"> Chỉ lỗi</label>
+              </div>
+            </template>
+            <button class="ghost" @click="loadLogs()">Làm mới</button>
+          </div>
+
+          <div class="card table-wrap" x-show="logTab==='requests'">
+            <table>
+              <thead><tr><th>Thời gian</th><th>Key</th><th>Mã</th><th class="num">Vào</th><th class="num">Cache</th><th class="num">Ra</th><th class="num">$</th><th class="num">Thời gian xử lý</th><th>Lỗi</th></tr></thead>
+              <tbody>
+                <template x-for="(r, i) in logs" :key="i">
+                  <tr>
+                    <td class="nowrap small muted" x-text="fmtDate(r.at)"></td>
+                    <td><a :href="'#/key/' + r.keyId" x-text="r.keyName"></a></td>
+                    <td><span class="badge" :class="r.status === 200 ? 'ok' : 'danger'" x-text="r.status"></span></td>
+                    <td class="num" x-text="r.input != null ? fmtNum(r.input) : '—'"></td>
+                    <td class="num" x-text="r.cached != null ? fmtNum(r.cached) : '—'"></td>
+                    <td class="num" x-text="r.output != null ? fmtNum(r.output) : '—'"></td>
+                    <td class="num" x-text="r.usd != null ? '$' + fmtUsd(r.usd, 5) : '—'"></td>
+                    <td class="num" x-text="r.ms + ' ms'"></td>
+                    <td class="small" x-text="r.error || ''"></td>
+                  </tr>
+                </template>
+                <tr x-show="logs.length === 0"><td colspan="9" class="empty">Chưa có request</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="card table-wrap" x-show="logTab==='events'">
+            <table>
+              <thead><tr><th>Thời gian</th><th>Loại</th><th>Nội dung</th></tr></thead>
+              <tbody>
+                <template x-for="(e, i) in logs" :key="i">
+                  <tr>
+                    <td class="nowrap small muted" x-text="fmtDate(e.at)"></td>
+                    <td><span class="badge" x-text="eventLabel(e.type)"></span></td>
+                    <td x-text="e.message"></td>
+                  </tr>
+                </template>
+                <tr x-show="logs.length === 0"><td colspan="3" class="empty">Chưa có thao tác</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- ===== Cài đặt ===== -->
+        <section x-show="view==='settings'">
+          <template x-if="settingsForm">
+            <form @submit.prevent="saveSettings()">
+              <div class="card">
+                <h3>Model (luôn ghi đè request của client)</h3>
+                <div class="form-grid">
+                  <label>Model <input class="mono" x-model="settingsForm.model" required></label>
+                  <label>Reasoning effort
+                    <input class="mono" x-model="settingsForm.reasoningEffort" placeholder="bỏ trống = không gửi">
+                  </label>
+                </div>
+              </div>
+              <div class="card">
+                <h3>Giá model (USD / 1 triệu token)</h3>
+                <p class="muted small">Dùng để tính $ ước tính và chặn key theo giới hạn $. Đổi giá sẽ tính lại $ cho toàn bộ số token đã ghi nhận.</p>
+                <div class="form-grid">
+                  <label>Input <input type="number" min="0" step="any" x-model="settingsForm.prices.input"></label>
+                  <label>Cached input <input type="number" min="0" step="any" x-model="settingsForm.prices.cached_input"></label>
+                  <label>Output <input type="number" min="0" step="any" x-model="settingsForm.prices.output"></label>
+                </div>
+              </div>
+              <p class="error" x-show="settingsError" x-text="settingsError"></p>
+              <button class="primary" type="submit">Lưu cài đặt</button>
+            </form>
+          </template>
+        </section>
+      </main>
+
+      <!-- ===== Hộp thoại tạo key ===== -->
+      <div class="modal-bg" x-show="createOpen" x-transition.opacity @keydown.escape.window="closeCreate()">
+        <div class="modal card" @click.outside="!newToken && closeCreate()">
+          <template x-if="!newToken">
+            <form @submit.prevent="createKey()">
+              <h3>Tạo key con</h3>
+              <div class="form-grid one">
+                <label>Tên key <input x-model="createForm.name" maxlength="60" placeholder="vd. app-A-vn" required x-ref="createName"></label>
+                <label>Giới hạn $ (ước tính) <input type="number" min="0.0001" step="any" x-model="createForm.usdLimit" placeholder="bỏ trống = không giới hạn"></label>
+              </div>
+              <p class="error" x-show="createError" x-text="createError"></p>
+              <div class="actions">
+                <button class="primary" type="submit">Tạo</button>
+                <button type="button" class="ghost" @click="closeCreate()">Huỷ</button>
+              </div>
+            </form>
+          </template>
+          <template x-if="newToken">
+            <div>
+              <h3>Key đã tạo</h3>
+              <p class="warn-text small"><b>Key chỉ hiện một lần.</b> Copy và lưu lại ngay — đóng hộp thoại này sẽ không xem lại được.</p>
+              <div class="token-box mono" x-text="newToken"></div>
+              <div class="actions">
+                <button class="primary" @click="copyToken()" x-text="copied ? 'Đã copy ✓' : 'Copy key'"></button>
+                <button type="button" class="ghost" @click="closeCreate()">Đã lưu, đóng</button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <div class="toast" x-show="toast" x-transition x-text="toast"></div>
+    </div>
+  </template>
+</body>
+</html>
